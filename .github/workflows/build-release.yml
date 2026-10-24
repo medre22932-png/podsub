@@ -1,0 +1,135 @@
+name: Build and Release Cross-Platform App
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'podsub.py'
+      - 'podsub.spec'
+      - 'podsub-mac.spec'
+      - 'requirements.txt'
+      - '.github/workflows/build-release.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: build-and-release
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows Executable
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build Executable with PyInstaller
+        run: |
+          pyinstaller podsub.spec
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-binaries
+          path: dist/podsub.exe
+
+  build-macos:
+    name: Build macOS Application
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build macOS App Bundle
+        run: |
+          pyinstaller podsub-mac.spec
+
+      - name: Package macOS App into Zip
+        run: |
+          cd dist
+          zip -r -y podsub-macOS.zip podsub.app
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-binaries
+          path: dist/podsub-macOS.zip
+
+  publish-release:
+    name: Publish Latest Release
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Windows Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-binaries
+          path: release-assets
+
+      - name: Download macOS Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-binaries
+          path: release-assets
+
+      - name: Generate Short SHA & Timestamp
+        id: meta
+        run: |
+          echo "short_sha=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          echo "build_date=$(date -u +'%Y-%m-%d %H:%M UTC')" >> $GITHUB_OUTPUT
+
+      - name: Delete Old Latest Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --yes --cleanup-tag -R ${{ github.repository }} || true
+          gh api -X DELETE /repos/${{ github.repository }}/git/refs/tags/latest || true
+
+      - name: Create Fresh 'latest' GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          target_commitish: ${{ github.sha }}
+          name: "Latest Release (${{ steps.meta.outputs.short_sha }} • ${{ steps.meta.outputs.build_date }})"
+          body: |
+            ### Automated Build: `${{ steps.meta.outputs.short_sha }}`
+            **Built on:** ${{ steps.meta.outputs.build_date }}
+            
+            ### Downloads:
+            - **Windows**: `podsub.exe`
+            - **macOS**: `podsub-macOS.zip` (unzip and move `podsub.app` to Applications)
+          files: |
+            release-assets/podsub.exe
+            release-assets/podsub-macOS.zip
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
